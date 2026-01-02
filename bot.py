@@ -8,14 +8,15 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+logger = logging.getLogger(__name__)
 
-# Конфигурация бота
+# Конфигурация из переменных окружения
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 CHAT_MAPPING = {
-    -4973230673: 11,     # Из этого чата → в топик 11
-    -1002705141042: 2,   # Из этого чата → в топик 2
+    int(os.getenv('SOURCE_CHAT_1', -4973230673)): int(os.getenv('TARGET_TOPIC_1', 11)),
+    int(os.getenv('SOURCE_CHAT_2', -1002705141042)): int(os.getenv('TARGET_TOPIC_2', 2)),
 }
-TARGET_CHAT_ID = -1002290371611  # Целевой чат
+TARGET_CHAT_ID = int(os.getenv('TARGET_CHAT_ID', -1002290371611))
 
 async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Пересылает сообщение в соответствующий топик"""
@@ -27,22 +28,36 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=TARGET_CHAT_ID,
                 message_thread_id=CHAT_MAPPING[chat_id]
             )
-            logging.info(f"✅ Переслано из {chat_id}")
+            logger.info(f"✅ Переслано из чата {chat_id}")
         except Exception as e:
-            logging.error(f"❌ Ошибка: {e}")
+            logger.error(f"❌ Ошибка пересылки: {e}")
 
-def main():
-    """Запуск бота"""
+def run_bot():
+    """Функция для запуска бота (вызывается из app.py)"""
     if not TOKEN:
-        logging.error("❌ Токен не найден! Установите TELEGRAM_BOT_TOKEN")
+        logger.error("❌ TELEGRAM_BOT_TOKEN не установлен!")
         return
     
-    logging.info("🚀 Запуск бота...")
-    
-    # Создаем и запускаем бота
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, forward_message))
-    app.run_polling(drop_pending_updates=True)
+    try:
+        # Создаем приложение бота
+        application = Application.builder().token(TOKEN).build()
+        
+        # Добавляем обработчик сообщений
+        application.add_handler(
+            MessageHandler(filters.ALL & ~filters.COMMAND, forward_message)
+        )
+        
+        # Запускаем бота
+        logger.info("🤖 Бот запущен и ожидает сообщений...")
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True
+        )
+        
+    except Exception as e:
+        logger.error(f"💥 Критическая ошибка бота: {e}")
+        raise
 
+# Если файл запускается напрямую (для тестов)
 if __name__ == '__main__':
-    main()
+    run_bot()
