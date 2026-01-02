@@ -2,6 +2,7 @@ import os
 import logging
 import threading
 from flask import Flask
+from waitress import serve
 from bot import run_bot
 
 # Настройка логирования
@@ -45,10 +46,12 @@ def main():
     bot_thread = threading.Thread(target=start_bot, daemon=True)
     bot_thread.start()
     
-    # Запускаем Flask сервер
+    # Запускаем веб-сервер
     port = int(os.getenv('PORT', 10000))
     logger.info(f"🌐 Запуск веб-сервера на порту {port}")
-    app.run(host='0.0.0.0', port=port, debug=False)
+    
+    # Используем waitress для продакшена
+    serve(app, host='0.0.0.0', port=port)
 
 if __name__ == '__main__':
     main()

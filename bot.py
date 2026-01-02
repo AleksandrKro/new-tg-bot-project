@@ -51,12 +51,14 @@ def run_bot():
         logger.info("🤖 Бот запущен и ожидает сообщений...")
         application.run_polling(
             allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True
+            drop_pending_updates=True,
+            timeout=30,  # Добавляем таймаут
+            pool_timeout=30  # Добавляем pool_timeout
         )
         
     except Exception as e:
         logger.error(f"💥 Критическая ошибка бота: {e}")
-        raise
+        logger.error("Полная ошибка:", exc_info=True)
 
 # Если файл запускается напрямую (для тестов)
 if __name__ == '__main__':
