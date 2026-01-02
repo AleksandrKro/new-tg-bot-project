@@ -1,0 +1,19 @@
+services:
+  - type: worker
+    name: telegram-forward-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: SOURCE_CHAT_1
+        sync: false
+      - key: SOURCE_CHAT_2
+        sync: false
+      - key: TARGET_CHAT_ID
+        sync: false
+      - key: TARGET_TOPIC_1
+        sync: false
+      - key: TARGET_TOPIC_2
+        sync: false
