@@ -1,9 +1,28 @@
 import os
 import logging
 import threading
-import time
-from flask import Flask
-from telegram.ext import Updater, MessageHandler, Filters
+from flask import Flask, request
+from telegram import Update
+from telegram.ext import Application, MessageHandler, filters, ContextTypes
+
+# ========== НАСТРОЙКА ==========
+# 1. Токен бота. ЗАПОЛНИТЬ!
+BOT_TOKEN = os.environ.get('BOT_TOKEN', 'ВАШ_ТОКЕН_ОТ_BOTFATHER')
+
+# 2. Настройки пересылки. ЗАПОЛНИТЬ!
+# Ключ: ID исходного чата. Значение: ID темы (топика) в целевом чате.
+# ID чата можно получить через бота @userinfobot или @getidsbot
+# ID топика (темы) — число, которое можно скопировать из ссылки на сообщение в теме.
+SOURCE_CHAT_TO_TOPIC = {
+    -1001234567890: 12,  # Пример: из чата -1001234567890 -> в топик 12
+    -1009876543210: 34,  # из чата -1009876543210 -> в топик 34
+}
+
+# 3. ID целевого чата (куда пересылаем). ЗАПОЛНИТЬ!
+TARGET_CHAT_ID = -1001111111111  # Замените на ваш чат
+
+# 4. Проверка: бот должен быть админом ВО ВСЕХ указанных чатах!
+# ===============================
 
 # Настройка логирования
 logging.basicConfig(
@@ -12,86 +31,54 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Конфигурация
-TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-CHAT_MAPPING = {
-    int(os.getenv('SOURCE_CHAT_1', '-4973230673')): int(os.getenv('TARGET_TOPIC_1', '11')),
-    int(os.getenv('SOURCE_CHAT_2', '-1002705141042')): int(os.getenv('TARGET_TOPIC_2', '2')),
-}
-TARGET_CHAT_ID = int(os.getenv('TARGET_CHAT_ID', '-1002290371611'))
+# ========== ЛОГИКА БОТА ==========
+async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Пересылает сообщение из исходного чата в нужный топик целевого чата."""
+    chat_id = update.effective_chat.id
+    message_id = update.message.message_id
 
-# Flask приложение
+    # Проверяем, нужно ли пересылать из этого чата
+    if chat_id in SOURCE_CHAT_TO_TOPIC:
+        target_topic_id = SOURCE_CHAT_TO_TOPIC[chat_id]
+        try:
+            await context.bot.forward_message(
+                chat_id=TARGET_CHAT_ID,
+                from_chat_id=chat_id,
+                message_id=message_id,
+                message_thread_id=target_topic_id  # Ключевой параметр для топика!
+            )
+            logger.info(f"Переслано из {chat_id} в топик {target_topic_id}")
+        except Exception as e:
+            logger.error(f"Ошибка пересылки из {chat_id}: {e}")
+
+# ========== FLASK ДЛЯ PING ==========
+# Этот сервер нужен ТОЛЬКО для ответа на ping-запросы от сервисов мониторинга.
 app = Flask(__name__)
 
 @app.route('/')
-def home():
-    return "🤖 Telegram Bot активен", 200
-
-@app.route('/health')
-def health():
-    return {"status": "healthy"}, 200
-
-@app.route('/ping')
 def ping():
-    return "pong", 200
+    return "Bot is alive!", 200
 
-def forward_message(update, context):
-    """Пересылает сообщение"""
-    chat_id = update.effective_chat.id
-    
-    if chat_id in CHAT_MAPPING:
-        try:
-            update.message.forward(
-                chat_id=TARGET_CHAT_ID,
-                message_thread_id=CHAT_MAPPING[chat_id]
-            )
-            logger.info(f"✅ Переслано из {chat_id}")
-        except Exception as e:
-            logger.error(f"❌ Ошибка: {e}")
-
+# ========== ЗАПУСК ==========
 def run_bot():
-    """Запускает бота"""
-    if not TOKEN:
-        logger.error("❌ Токен не установлен!")
-        return
-    
-    while True:
-        try:
-            logger.info("🚀 Запуск Telegram бота...")
-            
-            updater = Updater(TOKEN, use_context=True)
-            dp = updater.dispatcher
-            
-            # Добавляем обработчик ВСЕХ сообщений
-            dp.add_handler(MessageHandler(Filters.all, forward_message))
-            
-            logger.info("🤖 Бот запущен и слушает сообщения...")
-            updater.start_polling()
-            updater.idle()
-            
-        except Exception as e:
-            logger.error(f"💥 Ошибка: {e}")
-            logger.info("🔄 Перезапуск через 10 секунд...")
-            time.sleep(10)
+    """Запускает бота в отдельном потоке."""
+    # Создаем приложение бота
+    bot_app = Application.builder().token(BOT_TOKEN).build()
+    # Добавляем обработчик ВСЕХ входящих сообщений (кроме команд)
+    bot_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, forward_message))
+    # Запускаем бота в режиме Long-Polling
+    logger.info("Бот запущен в режиме Long-Polling...")
+    bot_app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
-def start_bot_thread():
-    """Запускает бота в отдельном потоке"""
+def main():
+    # Запускаем бота в фоновом потоке
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
 
-def main():
-    """Основная функция"""
-    logger.info("🔄 Инициализация Web Service...")
-    
-    # Запускаем бота в фоне
-    start_bot_thread()
-    
-    # Запускаем Flask
-    port = int(os.getenv('PORT', 10000))
-    logger.info(f"🌐 Запуск веб-сервера на порту {port}")
-    
-    # Используем простой Flask сервер
-    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
+    # Получаем порт от Render (или используем 10000 по умолчанию)
+    port = int(os.environ.get("PORT", 10000))
+    # Запускаем Flask-сервер для пинга на всех интерфейсах (0.0.0.0)
+    app.run(host="0.0.0.0", port=port)
 
 if __name__ == '__main__':
     main()
