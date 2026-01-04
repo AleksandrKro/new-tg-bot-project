@@ -2,17 +2,16 @@ import os
 import sys
 import time
 import logging
-from flask import Flask, jsonify
-from telegram import Bot
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-import asyncio
 import threading
+from flask import Flask, jsonify
+import telebot
+from telebot.types import Message
 
 # ========== НАСТРОЙКА ==========
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 if not BOT_TOKEN:
     print("❌ ОШИБКА: BOT_TOKEN не установлен!")
-    print("   Render Dashboard → Settings → Environment → BOT_TOKEN=ваш_токен")
+    print("   Добавьте в Render: Settings → Environment → BOT_TOKEN")
     sys.exit(1)
 
 # ЗАМЕНИТЕ НА ВАШИ ДАННЫЕ!
@@ -42,117 +41,88 @@ def ping():
 def health():
     return jsonify({
         "status": "healthy",
+        "service": "telegram-forward-bot",
         "config": {
             "source_chats": len(SOURCE_CHAT_TO_TOPIC),
-            "target_chat": TARGET_CHAT_ID
+            "target_chat": TARGET_CHAT_ID,
+            "bot_token_set": bool(BOT_TOKEN)
         }
     }), 200
 
-# ========== СИНХРОННАЯ ЛОГИКА БОТА ==========
-def forward_message_sync(bot: Bot, chat_id: int, message_id: int, topic_id: int):
-    """Синхронная функция для пересылки сообщений"""
-    try:
-        bot.forward_message(
-            chat_id=TARGET_CHAT_ID,
-            from_chat_id=chat_id,
-            message_id=message_id,
-            message_thread_id=topic_id
-        )
-        logger.info(f"✅ Переслано из {chat_id} в топик {topic_id}")
-        return True
-    except Exception as e:
-        logger.error(f"❌ Ошибка пересылки из {chat_id}: {e}")
-        return False
+# ========== TELEGRAM БОТ (pyTelegramBotAPI) ==========
+bot = telebot.TeleBot(BOT_TOKEN)
 
-# ========== АСИНХРОННЫЕ ОБРАБОТЧИКИ ==========
-async def start_command(update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 Бот-пересылка активен!")
+@bot.message_handler(commands=['start'])
+def handle_start(message: Message):
+    """Обработчик команды /start"""
+    bot.reply_to(message, "🤖 Бот-пересылка активен!\nСообщения автоматически пересылаются в целевой чат.")
 
-async def forward_message_async(update, context: ContextTypes.DEFAULT_TYPE):
-    """Асинхронный обработчик, который вызывает синхронную функцию в отдельном потоке"""
-    chat_id = update.effective_chat.id
+@bot.message_handler(func=lambda message: True)
+def handle_all_messages(message: Message):
+    """Обработчик всех сообщений"""
+    chat_id = message.chat.id
     
+    # Проверяем, нужно ли пересылать из этого чата
     if chat_id in SOURCE_CHAT_TO_TOPIC:
         target_topic_id = SOURCE_CHAT_TO_TOPIC[chat_id]
         
-        # Запускаем синхронную функцию в отдельном потоке
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
-            forward_message_sync,
-            context.bot,
-            chat_id,
-            update.message.message_id,
-            target_topic_id
-        )
-
-async def error_handler(update, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Ошибка: {context.error}")
-
-# ========== ЗАПУСК БОТА ==========
-def run_bot():
-    """Запускает бота в отдельном потоке с собственным event loop"""
-    try:
-        # Создаем новый event loop для этого потока
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        # Создаем приложение бота без job_queue (чтобы избежать weak reference)
-        application = Application.builder().token(BOT_TOKEN).build()
-        
-        # Регистрируем обработчики
-        application.add_handler(CommandHandler("start", start_command))
-        application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, forward_message_async))
-        application.add_error_handler(error_handler)
-        
-        logger.info("🤖 Бот запущен...")
-        logger.info(f"📡 Отслеживается {len(SOURCE_CHAT_TO_TOPIC)} чат(ов)")
-        
-        # Запускаем polling
-        loop.run_until_complete(application.initialize())
-        loop.run_until_complete(application.start())
-        
-        # Запускаем polling вручную, без использования стандартного run_polling
-        updater = application.updater
-        if updater:
-            loop.run_until_complete(updater.start_polling(
-                allowed_updates=None,
-                drop_pending_updates=True
-            ))
-        
-        logger.info("✅ Бот успешно запущен и ожидает сообщений...")
-        
-        # Бесконечный цикл (удерживаем поток активным)
         try:
-            loop.run_forever()
-        except KeyboardInterrupt:
-            pass
-        finally:
-            loop.run_until_complete(application.stop())
-            loop.close()
+            # Пересылаем сообщение
+            bot.forward_message(
+                chat_id=TARGET_CHAT_ID,
+                from_chat_id=chat_id,
+                message_id=message.message_id,
+                message_thread_id=target_topic_id
+            )
+            logger.info(f"✅ Переслано сообщение из чата {chat_id} в топик {target_topic_id}")
             
-    except Exception as e:
-        logger.error(f"❌ Ошибка при запуске бота: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+        except Exception as e:
+            logger.error(f"❌ Ошибка при пересылке из {chat_id}: {e}")
 
-# ========== ОСНОВНОЙ ЗАПУСК ==========
+def run_bot():
+    """Запускает Telegram бота"""
+    logger.info("🤖 Запуск Telegram бота (pyTelegramBotAPI)...")
+    logger.info(f"📡 Отслеживается {len(SOURCE_CHAT_TO_TOPIC)} чат(ов)")
+    
+    # Удаляем вебхук, если он был установлен ранее
+    bot.remove_webhook()
+    
+    # Запускаем polling с настройками
+    bot.infinity_polling(
+        timeout=60,  # Таймаут в секундах
+        long_polling_timeout=60,  # Таймаут long polling
+        logger_level=logging.INFO,
+        restart_on_change=True,
+        skip_pending=True  # Пропустить ожидающие обновления
+    )
+
+def run_flask():
+    """Запускает Flask сервер для ping-запросов"""
+    port = int(os.environ.get("PORT", 10000))
+    logger.info(f"🚀 Flask ping-сервер запущен на порту {port}")
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
 def main():
     """Основная функция запуска"""
     print("=" * 60)
     print("🚀 ЗАПУСК TELEGRAM БОТА-ПЕРЕСЫЛКИ")
     print("=" * 60)
     print(f"✅ Python версия: {sys.version}")
-    print(f"✅ Токен: {BOT_TOKEN[:10]}...{BOT_TOKEN[-5:]}")
-    print(f"🔧 Чатов: {len(SOURCE_CHAT_TO_TOPIC)}")
+    print(f"✅ Токен бота: {BOT_TOKEN[:10]}...{BOT_TOKEN[-5:]}")
+    print(f"🔧 Настроено чатов: {len(SOURCE_CHAT_TO_TOPIC)}")
     print(f"🎯 Целевой чат: {TARGET_CHAT_ID}")
     
-    for chat_id, topic_id in SOURCE_CHAT_TO_TOPIC.items():
-        print(f"   • Чат {chat_id} → топик {topic_id}")
+    if SOURCE_CHAT_TO_TOPIC:
+        print("📋 Отслеживаемые чаты:")
+        for chat_id, topic_id in SOURCE_CHAT_TO_TOPIC.items():
+            print(f"   • Чат {chat_id} → топик {topic_id}")
     
     print("=" * 60)
-    print("📋 После запуска настройте UptimeRobot:")
-    print("   URL: https://ваш-сервис.onrender.com")
+    print("⚙️  Используется библиотека: pyTelegramBotAPI 4.21.0")
+    print("📡 Режим работы: Long-Polling")
+    print("=" * 60)
+    print("📋 После запуска настройте UptimeRobot для пинга:")
+    print(f"   URL: https://ваш-сервис.onrender.com")
     print("   Интервал: 5 минут")
     print("=" * 60)
     
@@ -160,13 +130,12 @@ def main():
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
     
-    # Ждем немного, чтобы бот успел запуститься
-    time.sleep(3)
+    # Даем боту время на запуск
+    time.sleep(5)
+    logger.info("✅ Telegram бот запущен в фоновом режиме")
     
     # Запускаем Flask в основном потоке
-    port = int(os.environ.get("PORT", 10000))
-    logger.info(f"🚀 Flask запущен на порту {port}")
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    run_flask()
 
 if __name__ == '__main__':
     main()
