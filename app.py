@@ -1,11 +1,11 @@
 import os
 import logging
-import threading
-import asyncio
-from flask import Flask, jsonify
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.error import TelegramError
+import asyncio
+from aiohttp import web
+import socket
 
 # ========== НАСТРОЙКА ==========
 # 1. Токен бота (Установите в Render: Settings → Environment → Add Environment Variable)
@@ -32,27 +32,6 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-
-# ========== FLASK ДЛЯ PING ==========
-app = Flask(__name__)
-
-@app.route('/')
-def ping():
-    """Основной эндпоинт для пинга (используется UptimeRobot)"""
-    return "✅ Бот активен! Сообщения пересылаются автоматически.", 200
-
-@app.route('/health')
-def health():
-    """Эндпоинт для проверки состояния сервиса"""
-    return jsonify({
-        "status": "healthy",
-        "service": "telegram-forward-bot",
-        "config": {
-            "source_chats_configured": len(SOURCE_CHAT_TO_TOPIC),
-            "target_chat_id": TARGET_CHAT_ID,
-            "bot_token_set": bool(BOT_TOKEN)
-        }
-    }), 200
 
 # ========== ЛОГИКА БОТА ==========
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -90,48 +69,45 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик ошибок бота"""
     logger.error(f"Ошибка в обработчике бота: {context.error}")
 
-def run_flask():
-    """Запускает Flask-сервер для ping-запросов"""
-    port = int(os.environ.get("PORT", 10000))
-    logger.info(f"🚀 Flask ping-сервер запущен на порту {port}")
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+# ========== HTTP СЕРВЕР ДЛЯ PING ==========
+async def handle_ping(request):
+    """Обработчик ping-запросов"""
+    return web.Response(text="✅ Бот активен! Сообщения пересылаются автоматически.")
 
-def run_bot():
-    """Запускает Telegram-бота в отдельном потоке"""
-    try:
-        # Создаем новый event loop для этого потока
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        # Создаем приложение бота
-        application = Application.builder().token(BOT_TOKEN).build()
-        
-        # Регистрируем обработчики
-        application.add_handler(CommandHandler("start", start_command))
-        application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, forward_message))
-        application.add_error_handler(error_handler)
-        
-        logger.info("🤖 Бот запущен в режиме Long-Polling...")
-        logger.info(f"📡 Отслеживается {len(SOURCE_CHAT_TO_TOPIC)} чат(ов)")
-        logger.info(f"🎯 Целевой чат: {TARGET_CHAT_ID}")
-        
-        # Выводим список отслеживаемых чатов
-        for chat_id, topic_id in SOURCE_CHAT_TO_TOPIC.items():
-            logger.info(f"   • Чат {chat_id} → топик {topic_id}")
-        
-        # Запускаем бота
-        application.run_polling(
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True,
-            close_loop=False
-        )
-        
-    except Exception as e:
-        logger.error(f"❌ Критическая ошибка в работе бота: {e}")
-        raise
+async def handle_health(request):
+    """Обработчик health check"""
+    data = {
+        "status": "healthy",
+        "service": "telegram-forward-bot",
+        "config": {
+            "source_chats_configured": len(SOURCE_CHAT_TO_TOPIC),
+            "target_chat_id": TARGET_CHAT_ID,
+            "bot_token_set": bool(BOT_TOKEN)
+        }
+    }
+    return web.json_response(data)
+
+async def start_http_server():
+    """Запускает HTTP сервер для ping-запросов"""
+    app = web.Application()
+    app.router.add_get('/', handle_ping)
+    app.router.add_get('/health', handle_health)
+    
+    port = int(os.environ.get("PORT", 10000))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    
+    logger.info(f"🚀 HTTP ping-сервер запущен на порту {port}")
+    logger.info(f"🌐 URL для пинга: http://0.0.0.0:{port}")
+    
+    # Бесконечно держим сервер запущенным
+    await asyncio.Event().wait()
 
 # ========== ОСНОВНОЙ ЗАПУСК ==========
-if __name__ == '__main__':
+async def main():
+    """Основная асинхронная функция"""
     # Выводим информацию о конфигурации при запуске
     print("=" * 60)
     print("🚀 ЗАПУСК TELEGRAM БОТА-ПЕРЕСЫЛКИ")
@@ -144,26 +120,64 @@ if __name__ == '__main__':
     print(f"🔧 Настроено чатов для пересылки: {len(SOURCE_CHAT_TO_TOPIC)}")
     print(f"🎯 Целевой чат ID: {TARGET_CHAT_ID}")
     
-    # Проверяем конфигурацию
-    if TARGET_CHAT_ID == -1001111111111:
-        print("⚠️  ВНИМАНИЕ: TARGET_CHAT_ID не изменен!")
-        print("   Замените -1001111111111 на реальный ID целевого чата в строке 20")
+    # Выводим список отслеживаемых чатов
+    if SOURCE_CHAT_TO_TOPIC:
+        print("📋 Отслеживаемые чаты:")
+        for chat_id, topic_id in SOURCE_CHAT_TO_TOPIC.items():
+            print(f"   • Чат {chat_id} → топик {topic_id}")
     
+    # Проверяем конфигурацию
     if not SOURCE_CHAT_TO_TOPIC:
         print("⚠️  ВНИМАНИЕ: SOURCE_CHAT_TO_TOPIC пуст!")
         print("   Добавьте ID чатов и топиков в строки 16-19")
     
     print("=" * 60)
     print("📋 После запуска настройте UptimeRobot для пинга:")
-    print(f"   URL: https://ваш-сервис.onrender.com")
-    print(f"   Interval: 5 минут")
+    print("   URL: https://ваш-сервис.onrender.com")
+    print("   Interval: 5 минут")
     print("=" * 60)
     
-    # Запускаем бота в отдельном потоке
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-    logger.info("✅ Поток Telegram бота запущен")
+    # Создаем и настраиваем приложение бота
+    application = Application.builder().token(BOT_TOKEN).build()
     
-    # Запускаем Flask в основном потоке
-    logger.info("✅ Запуск Flask ping-сервера...")
-    run_flask()
+    # Регистрируем обработчики
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, forward_message))
+    application.add_error_handler(error_handler)
+    
+    logger.info("🤖 Инициализация бота...")
+    
+    # Запускаем HTTP сервер в фоне
+    http_task = asyncio.create_task(start_http_server())
+    
+    # Даем время HTTP серверу запуститься
+    await asyncio.sleep(2)
+    
+    logger.info("🤖 Бот запущен в режиме Long-Polling...")
+    logger.info(f"📡 Отслеживается {len(SOURCE_CHAT_TO_TOPIC)} чат(ов)")
+    logger.info(f"🎯 Целевой чат: {TARGET_CHAT_ID}")
+    
+    # Запускаем бота
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True
+    )
+    
+    logger.info("✅ Бот успешно запущен и ожидает сообщений...")
+    
+    # Ждем, пока работают оба сервиса
+    await asyncio.gather(
+        http_task,
+        # Бот работает в фоне через polling
+    )
+
+if __name__ == '__main__':
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("🛑 Бот остановлен пользователем")
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка: {e}")
+        raise
